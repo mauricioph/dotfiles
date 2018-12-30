@@ -1,0 +1,7 @@
+/bin/bash
+if [ ! ${1} }
+then enter the family
+exit 1
+else sudo nmap -sP 192.168.${1}.0/24 | sed '/192/!d' | wc -l
+fi
+

@@ -1,0 +1,26 @@
+#!/bin/bash
+percent=$(upower -i /org/freedesktop/UPower/devices/battery_BAT0 | grep percentage | cut -d ":" -f 2 | awk '{print $1}')
+status=$(upower -i /org/freedesktop/UPower/devices/battery_BAT0 | grep status | cut -d ":" -f 2 | awk '{print $1}')
+echo ${percent}
+if [ "$status" = "Discharging" ]
+then echo ${percent}
+	if [ $percent < 20 ]
+		then echo "#FF0000 ${percent}\n";
+        else if [ $percent < 40 ]
+               		then echo "#FFAE00 ${percent}\n";
+        	else if [ $percent < 60 ]
+               			then echo "#FFF600 ${percent}\n";
+        		else if [ $percent < 85 ]
+               				then echo "#A8FF00 ${percent}\n";
+				else echo ${percent}
+				fi
+			fi
+	        fi
+	fi
+
+      if [ $percent < 5 ] 
+		then echo "Recharge Now, you may lose data ${percent}";
+      fi
+echo ${percent}
+fi
+

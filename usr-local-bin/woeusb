@@ -1,0 +1,1359 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2026
+# SC2026 disabled because of false positives(ShellCheck issue #923)
+
+# A Linux program to create bootable Windows USB stick from a real Windows DVD or an image
+# Copyright © 2013 Colin GILLE / congelli501
+# Copyright © 2017 slacka et. al.
+
+# This file is part of WoeUSB.
+#
+# WoeUSB is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# WoeUSB is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with WoeUSB  If not, see <http://www.gnu.org/licenses/>.
+
+# Notes:
+#
+# * Use --strip instead of --no-symlinks for compatibility of Ubuntu 14.04(EoL: April 2019)
+
+## Makes debuggers' life easier - Unofficial Bash Strict Mode
+## BASHDOC: Shell Builtin Commands - Modifying Shell Behavior - The Set Builtin
+set -o errexit
+set -o errtrace
+set -o nounset
+set -o pipefail
+
+## Enable aliases for easy access to functions
+shopt -s expand_aliases
+
+for critical_command in realpath basename dirname; do
+	if ! command -v "${critical_command}" &> /dev/null; then
+		echo "Fatal: This program requires GNU Coreutils in the executable search path"
+		exit 1
+	fi
+done
+
+## Non-overridable Primitive Variables
+## BASHDOC: Shell Variables » Bash Variables
+## BASHDOC: Basic Shell Features » Shell Parameters » Special Parameters
+if [ -v "BASH_SOURCE[0]" ]; then
+	RUNTIME_EXECUTABLE_PATH="$(realpath --strip "${BASH_SOURCE[0]}")"
+	RUNTIME_EXECUTABLE_FILENAME="$(basename "${RUNTIME_EXECUTABLE_PATH}")"
+	RUNTIME_EXECUTABLE_NAME="${RUNTIME_EXECUTABLE_FILENAME%.*}"
+	RUNTIME_EXECUTABLE_DIRECTORY="$(dirname "${RUNTIME_EXECUTABLE_PATH}")"
+	RUNTIME_COMMANDLINE_BASECOMMAND="${0}"
+	# Keep these partially unused variables declared
+	# shellcheck disable=SC2034
+	declare -r\
+		RUNTIME_EXECUTABLE_PATH\
+		RUNTIME_EXECUTABLE_FILENAME\
+		RUNTIME_EXECUTABLE_NAME\
+		RUNTIME_EXECUTABLE_DIRECTORY\
+		RUNTIME_COMMANDLINE_BASECOMMAND
+fi
+declare -ar RUNTIME_COMMANDLINE_PARAMETERS=("${@}")
+
+declare -r APPLICATION_NAME="WoeUSB"
+
+declare -r DEFAULT_NEW_FS_LABEL="Windows USB"
+
+declare -i\
+	verbose='0'\
+	only_for_gui='0'\
+	no_color='0'
+
+declare -ir DD_BLOCK_SIZE="((4 * 1024 * 1024))" # 4MiB
+
+## NOTE: Need to pass to traps, so need to be global
+declare\
+	source_fs_mountpoint\
+	target_fs_mountpoint\
+	target_device
+
+## FIXME: No documentation for this non-trivial parameter
+declare -i pulse_current_pid=0
+
+## Execution state for cleanup functions to determine if clean up is required
+declare current_state="pre-init"
+
+## For some reason alias won't be recognized in function if it's definition's LINENO is greater then it's reference in function, so we define it here:
+alias\
+	echo_with_color=util_echo_with_color\
+	switch_terminal_text_color=util_switch_terminal_text_color\
+	shift_array=util_shift_array\
+	is_target_busy=check_is_target_device_busy
+
+## Entry point of the main code
+init(){
+	current_state="enter-init"
+
+	local install_mode
+
+	# source_media may be a optical disk drive or a disk image
+	# target_media may be an entire usb storage device or just a partition
+	local\
+		source_media\
+		target_media
+
+	local target_partition
+
+	source_fs_mountpoint="/media/woeusb_source_$(date +%s)_$$"
+	target_fs_mountpoint="/media/woeusb_target_$(date +%s)_$$"
+
+	# Parameters that needs to be determined in runtime
+	# due to different names in distributions
+	declare\
+		command_mkdosfs\
+		command_grubinstall\
+		name_grub_prefix
+
+	declare new_file_system_label="${DEFAULT_NEW_FS_LABEL}"
+
+	if ! check_runtime_dependencies\
+		command_mkdosfs\
+		command_grubinstall\
+		name_grub_prefix; then
+		exit 1
+	fi
+
+	if ! process_commandline_parameters\
+			install_mode\
+			source_media\
+			target_media\
+			new_file_system_label; then
+		print_help
+		exit 1
+	fi
+
+	check_permission
+
+	if ! check_runtime_parameters\
+		install_mode\
+		source_media\
+		target_media\
+		"${new_file_system_label}"; then
+		print_help
+		exit 1
+	fi
+
+	# FIXME: Why `pulse on` here?
+	pulse on
+
+	determine_target_parameters\
+		"${install_mode}"\
+		"${target_media}"\
+		target_device\
+		target_partition
+
+	check_source_and_target_not_busy\
+		"${install_mode}"\
+		"${source_media}"\
+		"${target_device}"\
+		"${target_partition}"
+
+	if [ "${install_mode}" = 'device' ]; then
+		overwrite_target_partition_table\
+			"${target_device}"\
+			"legacy"
+		create_target_partition\
+			"${target_partition}"\
+			"FAT"\
+			"${new_file_system_label}"\
+			"${command_mkdosfs}"
+	fi
+
+	if [ "${install_mode}" = 'partition' ]; then
+		check_target_filesystem "${target_partition}"
+	fi
+
+	current_state="start-mounting"
+
+	if ! mount_source_filesystem\
+		"${source_media}"\
+		"${source_fs_mountpoint}"; then
+		echo_with_color red "Error: Unable to mount source filesystem"
+		exit 1
+	fi
+
+	if ! mount_target_filesystem\
+		"${target_partition}"\
+		"${target_fs_mountpoint}"; then
+		echo_with_color red "Error: Unable to mount target filesystem"
+		exit 1
+	fi
+
+	check_target_filesystem_free_space\
+		"${target_fs_mountpoint}"\
+		"${source_fs_mountpoint}"\
+		|| exit 1
+
+	copy_filesystem_files\
+		"${source_fs_mountpoint}"\
+		"${target_fs_mountpoint}"
+
+	workaround_support_windows_7_uefi_boot\
+		"${source_fs_mountpoint}"\
+		"${target_fs_mountpoint}"
+
+	install_bootloader_grub\
+		"${target_fs_mountpoint}"\
+		"${target_device}"\
+		"${command_grubinstall}"\
+		"${name_grub_prefix}"
+
+	current_state="finished"
+
+	pulse off
+
+	exit 0
+}; declare -fr init
+
+print_help(){
+	util_check_function_parameters_quantity 0 "${#}"
+
+	set +o xtrace
+	echo -e "${APPLICATION_NAME}'s Help"
+	echo -e "=========================="
+	echo -e "Create a bootable Windows USB device from a bootable Windows optical disk or an disk image"
+	echo -e
+	echo -e "Copy Windows files to an existing FAT partition of an USB storage and make it bootable"
+	echo -e "NOTE: All files that has the same name will be OVERWRITTEN!"
+	echo -e "\t""${RUNTIME_EXECUTABLE_NAME} --partition <source media path> <partition>"
+	echo -e "\t""Example: ${RUNTIME_EXECUTABLE_NAME} --partition win7_amd64.iso /dev/sdX1"
+	echo -e "\t""Example: ${RUNTIME_EXECUTABLE_NAME} --partition /dev/sr0 /dev/sdX1"
+	echo -e
+	echo -e "Completely DESTROY all previous data on an USB storage and recreate partition table and target partition, copy Windows files and make it bootable"
+	echo -e "\t""${RUNTIME_EXECUTABLE_NAME} --device <source media path> <device>"
+	echo -e "\t""Example: ${RUNTIME_EXECUTABLE_NAME} --device win7_amd64.iso /dev/sdX"
+	echo -e "\t""Example: ${RUNTIME_EXECUTABLE_NAME} --device /dev/sr0 /dev/sdX"
+	echo -e
+	echo -e "Options"
+	echo -e "\t--verbose, -v        ""Verbose mode"
+	echo -e "\t--help, -h           ""Show this help message and exit"
+	echo -e "\t--no-color           ""Disable color"
+	echo -e "\t--debug, -d          ""Enable script debugging"
+	echo -e "\t--label, -l          ""Label for the newly created file system in --device mode"
+	echo -e "\t                     ""Note that the label is not verified for validity and may be illegal for the filesystem"
+}; declare -fr print_help
+
+process_commandline_parameters(){
+	util_check_function_parameters_quantity 4 "${#}"
+	local -n install_mode_ref="${1}"; shift
+	local -n source_media_ref="${1}"; shift
+	local -n target_media_ref="${1}"; shift
+	local -n new_file_system_label_ref="${1}"
+
+	if [ "${#RUNTIME_COMMANDLINE_PARAMETERS[@]}" -eq 0 ]; then
+		print_help
+		exit 0
+	fi
+
+	local -a parameters=("${RUNTIME_COMMANDLINE_PARAMETERS[@]}")
+	local enable_debug=N
+
+	while [ "${#parameters[@]}" -ne 0 ]; do
+		case "${parameters[0]}" in
+			"--help"\
+			|"-h")
+				print_help;
+				exit 0
+				;;
+			"--debug")
+				enable_debug="Y"
+				;;
+			'--install'\
+			|--partition\
+			|-p)
+				if [ "${parameters[0]}" = --install ]; then
+					echo_with_color\
+						yellow\
+						"WARNING: The deprecated --install option is still available but will be dropped in ${APPLICATION_NAME} v3.0!"
+				fi
+				install_mode_ref='partition'
+				shift_array parameters
+				if [ "${#parameters[@]}" -lt 2 ]; then
+					echo_with_color\
+						"red"\
+						"${FUNCNAME[0]}: Error: --install option requires 2 arguments!"
+					return 1
+				fi
+				source_media_ref="${parameters[0]}"
+				shift_array parameters
+				target_media_ref="${parameters[0]}"
+				;;
+			'--format'\
+			|--device\
+			|-d)
+				if [ "${parameters[0]}" = --format ]; then
+					echo_with_color\
+						yellow\
+						"WARNING: The deprecated --format option is still available but will be dropped in ${APPLICATION_NAME} v3.0!"
+				fi
+				# Limitation of ShellCheck to detect usage of indirection variables
+				# https://github.com/koalaman/shellcheck/wiki/SC2034
+				# shellcheck disable=SC2034
+				install_mode_ref='device'
+				shift_array parameters
+				if [ "${#parameters[@]}" -lt 2 ]; then
+					echo_with_color\
+						"red"\
+						"${FUNCNAME[0]}: Error: --format option requires 2 arguments!"
+					return 1
+				fi
+				source_media_ref="${parameters[0]}"
+				shift_array parameters
+				target_media_ref="${parameters[0]}"
+				;;
+			'--verbose'|'-v')
+				verbose='1'
+				;;
+			'--for-gui')
+				no_color='1'
+				only_for_gui='1'
+				;;
+			'--no-color')
+				no_color='1'
+				;;
+			'--label'|'-l')
+				shift_array parameters
+				new_file_system_label_ref="${parameters[0]}"
+				;;
+			*)
+				echo_with_color red "ERROR: Unknown command-line argument \"${parameters[0]}\"" >&2
+				return 1
+				;;
+		esac
+		shift_array parameters
+	done
+
+	if [ "${verbose}" = "1" ] && [ "${enable_debug}" != "Y" ]; then
+		trap 'trap_return "${FUNCNAME[0]}"' RETURN
+
+		# Disabled due to FIXME
+		# trap 'trap_debug "${BASH_COMMAND}"' DEBUG
+	fi
+
+	if [ "${enable_debug}" = "Y" ]; then
+		set -o xtrace
+	fi
+	return 0
+}; declare -fr process_commandline_parameters;
+
+check_runtime_dependencies(){
+	util_check_function_parameters_quantity 3 $#
+	local -n command_mkdosfs_ref="$1"; shift
+	local -n command_grubinstall_ref="$1"; shift
+	local -n name_grub_prefix_ref="$1"
+
+	local result="unknown"
+
+	for required_command in\
+		mount\
+		grep\
+		dd\
+		id\
+		mkdir\
+		df\
+		du\
+		awk\
+		parted\
+		blockdev\
+		partprobe\
+		stat\
+		rm\
+		readlink\
+		find\
+		lsblk\
+		expr
+		do
+		if ! command -v "${required_command}" >/dev/null; then
+			echo_with_color red "${FUNCNAME[0]}: Error: ${APPLICATION_NAME} requires ${required_command} command in the executable search path, but it is not found."
+			result=failed
+		fi
+	done
+
+	if command -v 'mkdosfs' &> /dev/null; then
+		command_mkdosfs_ref='mkdosfs'
+	elif command -v 'mkfs.msdos' &> /dev/null; then
+		command_mkdosfs_ref='mkfs.msdos'
+	elif command -v 'mkfs.vfat' &>/dev/null; then
+		command_mkdosfs_ref='mkfs.vfat'
+	elif command -v 'mkfs.fat' &>/dev/null; then
+		command_mkdosfs_ref='mkfs.fat'
+	else
+		echo_with_color red\
+			"${FUNCNAME[0]}: Error: mkdosfs/mkfs.msdos/mkfs.vfat/mkfs.fat command not found!" >&2
+		echo_with_color red\
+			"${FUNCNAME[0]}: Error: Please make sure that dosfstools is properly installed!" >&2
+		result="failed"
+	fi
+
+	if command -v 'grub-install' &> /dev/null; then
+		command_grubinstall_ref='grub-install'
+		name_grub_prefix_ref="grub"
+	elif command -v 'grub2-install' &> /dev/null; then
+		command_grubinstall_ref='grub2-install'
+		name_grub_prefix_ref="grub2"
+	else
+		echo_with_color red "${FUNCNAME[0]}: Error: grub-install or grub2-install command not found!" >&2
+		echo_with_color red "${FUNCNAME[0]}: Error: Please make sure that GNU GRUB is properly installed!" >&2
+		result="failed"
+	fi
+
+	if [ "${result}" == "failed" ]; then
+		return 1
+	else
+		return 0
+	fi
+}; declare -fr check_runtime_dependencies
+
+check_permission(){
+	if [ ! "$(id --user)" = 0 ]; then
+		util_switch_terminal_text_color yellow
+		printf --\
+			"%s\n%s\n"\
+			"Warning: You are not running WoeUSB as root!"\
+			"Warning: This might be the reason of the following failure." >&2
+		util_switch_terminal_text_color none
+	fi
+	return 0
+}; declare -fr check_permission
+
+check_runtime_parameters(){
+	util_check_function_parameters_quantity 4 $#
+	local -n install_mode_ref="${1}"; shift
+	local -n source_media_ref="${1}"; shift
+	local -n target_media_ref="${1}"; shift
+	local new_file_system_label="${1}"
+
+	if ! util_is_parameter_set_and_not_empty install_mode_ref\
+		|| ! util_is_parameter_set_and_not_empty source_media_ref\
+		|| ! util_is_parameter_set_and_not_empty target_media_ref; then
+		echo_with_color red "${FUNCNAME[0]}: Error: No install method specified!" >&2
+		return 1
+	fi
+
+	if [ ! -f "${source_media_ref}" ] \
+		&& [ ! -b "${source_media_ref}" ]; then
+		echo_with_color red "${FUNCNAME[0]}: Error: source media \"${source_media_ref}\" not found or not a regular file or a block device file!" >&2
+		return 1
+	fi
+
+	if ! [ -b "${target_media_ref}" ]; then
+		echo_with_color red "${FUNCNAME[0]}: Error: Target media \"${target_media_ref}\" is not a block device file!" >&2
+		return 1
+	fi
+
+	if [ "${install_mode_ref}" = device ] \
+		&& expr match "${target_media}" '.*[0-9]' >/dev/null
+		then
+		echo_with_color red "${FUNCNAME[0]}: Error: Target media \"${target_media_ref}\" is not an entire storage device!"
+		return 1
+	fi
+
+	if [ "${install_mode_ref}" = partition ] \
+		&& ! expr match "${target_media}" '.*[0-9]' >/dev/null
+		then
+		echo_with_color red "${FUNCNAME[0]}: Error: Target media \"${target_media_ref}\" is not an partition!"
+		return 1
+	fi
+
+	if [ "${install_mode_ref}" != "device" ] \
+		&& [ "${new_file_system_label}" != "${DEFAULT_NEW_FS_LABEL}" ]; then
+		echo_with_color red "${FUNCNAME[0]}: Error: --label option only can be used with --format option"
+		return 1
+	fi
+	return 0
+}; declare -fr check_runtime_parameters
+
+determine_target_parameters(){
+	util_check_function_parameters_quantity 4 $#
+	local install_mode="${1}"; shift
+	local target_media="${1}"; shift
+	local -n target_device_ref="${1}"; shift
+	local -n target_partition_ref="${1}"; shift
+
+	if [ "${install_mode}" = 'partition' ]; then
+		target_partition_ref="${target_media}"
+		# BASHDOC: Basic Shell Features » Shell Expansions » Shell Parameter Expansion(`${PARAMETER/PATTERN/STRING}')
+		target_device_ref="${target_media/%[0-9]/}"
+	else # install_mode = device
+		target_device_ref="${target_media}"
+		target_partition_ref="${target_device}1"
+	fi
+
+	if [ "${verbose}" = '1' ]; then
+		echo "${FUNCNAME[0]}: Info: Target device is '${target_device_ref}'."
+		echo "${FUNCNAME[0]}: Info: Target partition is '${target_partition_ref}'."
+	fi
+	return 0
+}; declare -fr determine_target_parameters
+
+check_is_target_device_busy(){
+	util_check_function_parameters_quantity 1 $#
+	local device="${1}"
+
+	if [ "$(mount | grep -c "${device}")" -ne 0 ]; then
+		return 0
+	else
+		return 1
+	fi
+}; declare -fr check_is_target_device_busy
+
+check_source_and_target_not_busy(){
+	util_check_function_parameters_quantity 4 $#
+	local install_mode="$1"; shift
+	local source_media="$1"; shift
+	local target_device="$1"; shift
+	local target_partition="$1"
+
+	if [ "$(mount | grep -c "${source_media}")" != 0 ]; then
+		echo_with_color red "Error: Source media is currently mounted, unmount the partition then try again"
+		exit 1
+	fi
+
+	if [ "${install_mode}" = "partition" ]; then
+		if [ "$(mount | grep -c "${target_partition}")" != 0 ]; then
+			echo_with_color red "Error: Target partition is currently mounted, unmount the partition then try again"
+			exit 1
+		fi
+	else # When install_mode = device, all target partitions needs to by unmounted
+		if is_target_busy "${target_device}"; then
+			echo_with_color red "Error: Target device is currently busy, unmount all mounted partitions in target device then try again"
+			exit 1
+		fi
+	fi
+}; declare -fr check_source_and_target_not_busy
+
+overwrite_target_partition_table(){
+	util_check_function_parameters_quantity 2 $#
+	local -r target_device="${1}"; shift
+	local -r partition_table_type="${1}"
+
+	echo_with_color green "Overwriting \"${target_device}\"'s partition table..."
+
+	local parted_partiton_table_argument
+
+	case "${partition_table_type}" in
+		legacy|msdos|mbr|pc)
+			parted_partiton_table_argument="msdos"
+			;;
+		gpt|guid)
+			parted_partiton_table_argument="gpt"
+			echo_with_color\
+				red\
+				"${FUNCNAME[0]}: Error: Currently GUID partition table is not supported."
+			return 2
+			;;
+		*)
+			echo_with_color\
+				red\
+				"${FUNCNAME[0]}: Error: Partition table not supported."
+			return 2
+			;;
+	esac
+
+	# Create partition table(and overwrite the old one, whatever it was)
+	parted --script\
+		"${target_device}"\
+		mklabel\
+		"${parted_partiton_table_argument}"
+}; declare -fr overwrite_target_partition_table
+
+# NOTE: This really should be done automatically by GNU Parted after every operation
+workaround_make_system_realize_partition_table_changed(){
+	util_check_function_parameters_quantity 1 $#
+	local -r target_device="$1"
+
+	# Reload the new partition table
+	# FIXME: Is `blockdev` and `partprobe` both required?
+	blockdev\
+		--rereadpt\
+		"${target_device}"\
+		|| true
+	partprobe\
+		"${target_device}"
+	echo "Wait 3 seconds for block device nodes to populate..."
+	sleep 3
+
+}; declare -fr workaround_make_system_realize_partition_table_changed
+
+create_target_partition(){
+	util_check_function_parameters_quantity 4 $#
+	local -r target_partition="$1"; shift
+	local -r filesystem_type="$1"; shift
+	local -r filesystem_label="$1"; shift
+	local -r command_mkdosfs="$1"
+
+	# Refer: GNU Parted's (info) manual: Using Parted » Command explanations » mkpart
+	# Refer: sudo parted --script /dev/sda help mkpart
+	local parted_mkpart_fs_type
+	case "${filesystem_type}" in
+		FAT|vfat)
+			parted_mkpart_fs_type="fat32"
+			;;
+		NTFS|ntfs)
+			parted_mkpart_fs_type="ntfs"
+			echo_with_color red "${FUNCNAME[0]}: Error:    Currently NTFS filesystem is not supported."
+			return 2
+			;;
+		*)
+			echo_with_color red "${FUNCNAME[0]}: Error: Filesystem not supported"
+			return 2
+			;;
+	esac
+
+	# Create partition
+	# We start at 4MiB for grub (it needs a post-mbr gap for its code) and alignment of flash memery block erase segment in general, for details see http://www.gnu.org/software/grub/manual/grub.html#BIOS-installation and http://lwn.net/Articles/428584/
+	parted --script\
+		"${target_device}"\
+		mkpart\
+		primary\
+		"${parted_mkpart_fs_type}"\
+		4MiB\
+		-- -1s # last sector of the disk
+
+	workaround_make_system_realize_partition_table_changed\
+		"${target_device}"
+
+	# Create filesystem on partition
+	case "${filesystem_type}" in
+		FAT|vfat)
+			"${command_mkdosfs}"\
+				-F 32\
+				-n "${filesystem_label}" \
+				"${target_partition}"
+			;;
+		*)
+			echo_with_color red "${FUNCNAME}: FATAL: Shouldn't be here"
+			exit 1
+			;;
+	esac
+}; declare -fr create_target_partition
+
+check_target_filesystem(){
+	util_check_function_parameters_quantity 1 $#
+	local target_partition="${1}"
+
+	local target_filesystem
+	target_filesystem="$(
+		lsblk\
+			--output FSTYPE\
+			--noheadings\
+			"${target_partition}"
+	)"
+
+	if [ "${target_filesystem}" != "vfat" ]; then
+		echo_with_color red "${FUNCNAME[0]}: Error: Target filesystem not supported, currently supported filesystem: FAT"
+		return 1
+	fi
+	return 0
+}; declare -fr check_target_filesystem
+
+mount_source_filesystem(){
+	util_check_function_parameters_quantity 2 $#
+	local source_media="$1"; shift
+	local source_fs_mountpoint="$1"
+
+	echo_with_color green "Mounting source filesystem..."
+
+	mkdir\
+		--parents\
+		"${source_fs_mountpoint}"\
+		|| (
+			echo_with_color red "${FUNCNAME[0]}: Error: Unable to create \"${source_fs_mountpoint}\" mountpoint directory"
+			return 1
+		)
+	if [ -f "${source_media}" ]; then # ${source_media} is an ISO image
+		mount\
+			--options loop,ro\
+			--types udf,iso9660\
+			"${source_media}"\
+			"${source_fs_mountpoint}"\
+		|| (
+			echo_with_color red "${FUNCNAME[0]}: Error: Unable to mount source media"
+			return 1
+		)
+	else # ${source_media} is a real optical disk drive (block device)
+		mount\
+			--options ro\
+			"${source_media}"\
+			"${source_fs_mountpoint}"\
+		|| (
+			echo_with_color red "${FUNCNAME[0]}: Error: Unable to mount source media"
+			return 1
+		)
+	fi
+}; declare -fr mount_source_filesystem
+
+mount_target_filesystem(){
+	util_check_function_parameters_quantity 2 $#
+	local target_partition="$1"; shift
+	local target_fs_mountpoint="$1"
+
+	mkdir\
+		--parents\
+		"${target_fs_mountpoint}"\
+		|| (
+			echo_with_color red "${FUNCNAME[0]}: Error: Unable to create \"${target_fs_mountpoint}\" mountpoint directory"
+			return 1
+		)
+	mount\
+		"${target_partition}"\
+		"${target_fs_mountpoint}"\
+		|| (
+			echo_with_color red "${FUNCNAME[0]}: Error: Unable to mount target partition"
+			return 1
+		)
+}; declare -fr mount_target_filesystem
+
+check_target_filesystem_free_space(){
+	util_check_function_parameters_quantity 2 $#
+	local -r target_fs_mountpoint="${1}"; shift
+	local -r source_fs_mountpoint="${1}"
+
+	free_space=$(
+		df\
+			--block-size=1\
+			"${target_fs_mountpoint}"\
+		| grep "${target_fs_mountpoint}"\
+		| awk '{print $4}'
+	)
+	free_space_human_readable=$(
+		df\
+			--human-readable\
+			"${target_fs_mountpoint}"\
+		| grep "${target_fs_mountpoint}"\
+		| awk '{print $4}'
+	)
+	needed_space=$(
+		du\
+			--summarize\
+			--bytes\
+			"${source_fs_mountpoint}"\
+		| awk '{print $1}'
+	)
+	needed_space_human_readable=$(
+		du\
+			--summarize\
+			--human-readable\
+			"${source_fs_mountpoint}"\
+		| awk '{print $1}'
+	)
+	additional_space_required_for_grub_installation="$((1000 * 1000 * 10))" # 10MiB
+	((needed_space = needed_space + additional_space_required_for_grub_installation))
+
+	if [ "${needed_space}" -gt "${free_space}" ]; then
+		echo "Error: Not enough free space on target partition!" >&2
+		echo "Error: We required ${needed_space_human_readable}(${needed_space} bytes) but '${target_partition}' only has ${free_space_human_readable}(${free_space} bytes)." >&2
+		return 1
+	fi
+}; declare -fr check_target_filesystem_free_space
+
+## Copying all files from one filesystem to another, with progress reporting
+copy_filesystem_files(){
+	util_check_function_parameters_quantity 2 "${#}"
+	local source_fs_mountpoint="${1}"; shift
+	local target_fs_mountpoint="${1}"
+
+	local -i total_size
+	total_size=$(
+		du\
+			--summarize\
+			--bytes\
+			"${source_fs_mountpoint}"\
+		| awk '{print $1}'
+	)
+
+	# FIXME: Why do we `pulse off` and on here?
+	pulse off
+
+	echo_with_color green "Copying files from source media..."
+
+	pushd "${source_fs_mountpoint}" >/dev/null
+
+	local -i copied_size=0 percentage; while IFS='' read -r -d '' source_file; do
+		dest_file="${target_fs_mountpoint}/${source_file}"
+
+		source_file_size=$(
+			stat\
+				--format=%s\
+				"${source_file}"
+		)
+
+		if [ -d "${source_file}" ]; then
+			mkdir --parents "${dest_file}"
+		elif [ -f "${source_file}" ]; then
+			if [ "${verbose}" = 1 ]; then
+				echo -e "\nINFO: Copying "${source_file}"..."
+			fi
+			if [ "${source_file_size}" -lt "${DD_BLOCK_SIZE}" ]; then
+				cp "${source_file}" "${dest_file}"
+			else
+				copy_large_file\
+					"${source_file}"\
+					"${dest_file}"\
+					"${copied_size}"\
+					"${total_size}"
+			fi
+		else
+			echo_with_color red "${FUNCNAME[0]}: Error: Unknown type of '${source_file}'!" >&2
+			exit 1
+		fi
+
+		# Calculate and report progress
+		# BASHDOC: Bash Builtin Commands » Bash Builtin Commands » let
+		# BASHDOC: Bash Features » Shell Arithmetic
+		let "copied_size = copied_size + source_file_size" || true
+		let "percentage = (copied_size * 100) / total_size" || true
+		echo -en "${percentage}%\r"
+	done < <(\
+		find\
+			.\
+			-not -path "."\
+			-print0\
+	); unset source_file dest_file source_file_size copied_size percentage
+
+	popd >/dev/null
+
+	pulse on
+
+	return 0
+}; declare -fr copy_filesystem_files
+
+## Companion function of copy_filesystem_files for copying large files
+## Copy source_file to dest_file, overwrite file if dest_file exists
+## Also report copy_filesystem_files progress during operation
+copy_large_file(){
+	util_check_function_parameters_quantity 4 "${#}"
+	local -r source_file="${1}"; shift
+	local -r dest_file="${1}"; shift
+	local -ir caller_copied_size="${1}"; shift
+	local -ir caller_total_size="${1}"
+
+	local -i source_file_size
+	source_file_size=$(
+		stat\
+		--format=%s\
+		"${source_file}"
+	)
+
+	# block count of the source file
+	local -i block_number
+	((block_number = source_file_size / DD_BLOCK_SIZE + 1))
+	unset source_file_size
+
+	if [ -f "${dest_file}" ]; then
+		rm "${dest_file}"
+	fi
+
+	# Copy file block by block
+	local -i i=0 copied_size_total percentage; while [ "${i}" -lt "${block_number}" ]; do
+		dd\
+			if="${source_file}"\
+			bs="${DD_BLOCK_SIZE}"\
+			skip="${i}"\
+			seek="${i}"\
+			of="${dest_file}"\
+			count=1\
+			2> /dev/null
+		((i = i + 1))
+
+		# Calculate and report progress
+		# BASHDOC: Bash Builtin Commands » Bash Builtin Commands » let
+		# BASHDOC: Bash Features » Shell Arithmetic
+		let "copied_size_total = caller_copied_size + DD_BLOCK_SIZE * i" || true
+		let "percentage = (copied_size_total * 100) / caller_total_size" || true
+		echo -en "${percentage}%\r"
+	done; unset i copied_size_total percentage
+
+	return 0
+}; declare -fr copy_large_file
+
+## As Windows 7's installation media doesn't place the required EFI
+## bootloaders in the right location, we extract them from the
+## system image manually
+## TODO: Functionize Windows 7 checking
+workaround_support_windows_7_uefi_boot(){
+	util_check_function_parameters_quantity 2 "${#}"
+	local source_fs_mountpoint="${1}"; shift
+	local target_fs_mountpoint="${1}"
+
+	if !(\
+		grep\
+			--extended-regexp\
+			--quiet\
+			"^MinServer=7[0-9]{3}\.[0-9]"\
+			"${source_fs_mountpoint}/sources/cversion.ini"\
+		&& [ -f "${source_fs_mountpoint}/bootmgr.efi" ] ); then
+		return 0
+	fi
+
+	echo_with_color yellow "Source media seems to be Windows 7-based with EFI support, applying workaround to make it support UEFI booting"
+	if ! command -v "7z" >/dev/null 2>&1; then
+		echo_with_color yellow "Warning: '7z' utility not found, workaround is not applied." >&2
+		return 0
+	fi
+
+	# Detect **case-insensitive** existing efi directories according to UEFI spec
+	local\
+		test_efi_directory\
+		efi_directory
+	test_efi_directory="$(
+		find\
+			"${target_fs_mountpoint}"\
+			-ipath "${target_fs_mountpoint}/efi"
+	)"
+	if [ -z "${test_efi_directory}" ]; then
+		efi_directory="${target_fs_mountpoint}/efi"
+		if [ "${verbose}" = "1" ]; then
+			printf\
+				"%s: DEBUG: Can't find efi directory, use %s.\n"\
+				"${FUNCNAME[0]}"\
+				"${efi_directory}"
+		fi
+	else # efi directory(case don't care) exists
+		efi_directory="${test_efi_directory}"
+		if [ "${verbose}" = "1" ]; then
+			printf\
+				"%s: DEBUG: %s detected.\n"\
+				"${FUNCNAME[0]}"\
+				"${efi_directory}"
+		fi
+	fi
+	unset test_efi_directory
+
+	local\
+		test_efi_boot_directory\
+		efi_boot_directory
+	test_efi_boot_directory="$(
+		find\
+			"${target_fs_mountpoint}"\
+			-ipath "${efi_directory}/boot"
+	)"
+	if [ -z "${test_efi_boot_directory}" ]; then
+		efi_boot_directory="${efi_directory}/boot"
+		if [ "${verbose}" = "1" ]; then
+			printf\
+				"%s: DEBUG: Can't find efi/boot directory, use %s.\n"\
+				"${FUNCNAME[0]}"\
+				"${efi_boot_directory}"
+		fi
+	else # boot directory(case don't care) exists
+		efi_boot_directory="${test_efi_boot_directory}"
+		if [ "${verbose}" = "1" ]; then
+			printf\
+				"%s: DEBUG: %s detected.\n"\
+				"${FUNCNAME[0]}"\
+				"${efi_boot_directory}"
+		fi
+	fi
+	unset\
+		efi_directory\
+		test_efi_boot_directory
+
+	# If there's already an EFI bootloader existed, skip the workaround
+	local test_efi_bootloader
+	test_efi_bootloader="$(
+		find\
+			"${target_fs_mountpoint}"\
+			-ipath "${target_fs_mountpoint}/efi/boot/boot*.efi"
+	)"
+	if [ -n "${test_efi_bootloader}" ]; then
+		printf\
+			"INFO: Detected existing EFI bootloader, workaround skipped.\n"
+		return 0
+	fi
+
+	mkdir\
+		--parents\
+		"${efi_boot_directory}"
+
+	# Skip workaround if EFI bootloader already exist in efi_boot_directory
+	7z\
+		e\
+		-so\
+		"${source_fs_mountpoint}/sources/install.wim"\
+		"Windows/Boot/EFI/bootmgfw.efi"\
+		> "${efi_boot_directory}/bootx64.efi"
+}; declare -fr workaround_support_windows_7_uefi_boot
+
+install_bootloader_grub(){
+	util_check_function_parameters_quantity 4 "${#}"
+	local -r target_fs_mountpoint="${1}"; shift 1
+	local -r target_device="${1}"; shift 1
+	local -r command_grubinstall="${1}"; shift 1
+	local -r name_grub_prefix="${1}"
+
+	echo_with_color green "Installing GRUB bootloader for legacy boot support..."
+	"${command_grubinstall}"\
+		--target=i386-pc\
+		--boot-directory="${target_fs_mountpoint}"\
+		--force "${target_device}"
+
+	echo_with_color green "Installing grub.cfg..."
+	local -r grub_cfg="${target_fs_mountpoint}/${name_grub_prefix}/grub.cfg"
+	local -r target_fs_uuid=$(
+		lsblk\
+			--output UUID\
+			--noheadings\
+			"${target_partition}"
+	)
+
+	mkdir --parents "$(dirname "${grub_cfg}")"
+	{
+		cat <<- END_OF_FILE
+			echo '------------------------------------'
+			echo '|      Windows USB - Loading...    |'
+			echo '------------------------------------'
+			insmod fat
+			search --no-floppy --fs-uuid ${target_fs_uuid} --set root
+			ntldr /bootmgr
+			echo -n "Press ENTER to continue booting..."
+			read key_holder
+			boot
+		END_OF_FILE
+	} > "${grub_cfg}"
+}; declare -fr install_bootloader_grub
+
+## Unmount mounted filesystems and clean-up mountpoints before exiting program
+## exit status:
+##     unclean(2): Not fully clean, target device can be safely detach from host
+##     unsafe(3): Target device cannot be safely detach from host
+cleanup_mountpoints(){
+	util_check_function_parameters_quantity 2 "${#}"
+	local -r source_fs_mountpoint="${1}"; shift
+	local -r target_fs_mountpoint="${1}"
+
+	local clean_result="unknown"
+
+	# FIXME: Why `pulse off` here?
+	pulse off
+
+	# In copy_filesystem_files, we use `pushd` to changed the working directory into source_fs_mountpoint in order to get proper source and target file path, proactively `popd` to ensure we are not in source_fs_mountpoint and preventing source filesystem to unmount
+	popd &>/dev/null\
+		|| true
+
+	if [ -e "${source_fs_mountpoint}" ]; then
+		echo_with_color green "Unmounting and removing '${source_fs_mountpoint}'..."
+		if umount "${source_fs_mountpoint}"; then
+			if ! rmdir "${source_fs_mountpoint}"; then
+				echo_with_color yellow "${FUNCNAME}: Warning: Unable to remove source mountpoint"
+				clean_result="unclean"
+			fi
+		else
+			echo_with_color yellow "${FUNCNAME}: Warning: Unable to unmount source filesystem."
+			clean_result="unclean"
+		fi
+	fi
+
+	if [ -e "${target_fs_mountpoint}" ]; then
+	echo_with_color green "Unmounting and removing '${target_fs_mountpoint}'..."
+		if umount "${target_fs_mountpoint}"; then
+			if ! rmdir "${target_fs_mountpoint}"; then
+				echo_with_color yellow "${FUNCNAME}: Warning: Unable to remove target mountpoint"
+				clean_result="unclean"
+			fi
+		else
+			echo_with_color yellow "${FUNCNAME}: Warning: Unable to unmount target filesystem."
+			clean_result="unsafe"
+		fi
+	fi
+
+	if [ "${clean_result}" == "unclean" ]; then
+		return 2
+	elif [ "${clean_result}" == "unsafe" ]; then
+		return 3
+	else
+		return 0
+	fi
+}; declare -fr cleanup_mountpoints
+
+## FIXME: What is this function's purpose
+pulse(){
+	util_check_function_parameters_quantity 1 $#
+	if [ "$only_for_gui" -eq 1 ]; then
+		if [ ! "$pulse_current_pid" -eq 0 ]; then
+			kill "$pulse_current_pid" >/dev/null
+			#wait "$pulse_current_pid"
+			pulse_current_pid=0
+		fi
+
+		if [ "$1" = 'on' ]; then
+			cd /; while true; do sleep 0.05; echo 'pulse'; done &
+			pulse_current_pid="$!"
+		elif [ "$1" != 'off' ]; then
+			echo "${FUNCNAME[0]}: FATAL: Illegal function parameter" >&2
+			exit 1
+		fi
+	fi
+}; declare -fr pulse
+
+## Traps: Functions that are triggered when certain condition occurred
+## Shell Builtin Commands » Bourne Shell Builtins » trap
+trap_errexit(){
+	echo_with_color red "The command \"${BASH_COMMAND}\" failed with exit status \"${?}\", program is prematurely aborted" 1>&2
+
+	return 0
+}; declare -fr trap_errexit
+
+trap_exit(){
+	if \
+		util_is_parameter_set_and_not_empty\
+			source_fs_mountpoint\
+		&& util_is_parameter_set_and_not_empty\
+			target_fs_mountpoint; then
+		if cleanup_mountpoints\
+			"${source_fs_mountpoint}"\
+			"${target_fs_mountpoint}"; then
+			:
+		elif [ "${?}" == "2" ]; then
+			echo_with_color yellow "Some mountpoints are not unmount/cleaned successfully and must be done manually"
+		else # $? == 3, target filesystem not unmounted
+			echo_with_color yellow "We unable to unmount target filesystem for you, please make sure target filesystem is unmounted before detaching to prevent data corruption"
+			echo_with_color yellow "Some mountpoints are not unmount/cleaned successfully and must be done manually"
+		fi
+	fi
+
+	if \
+		util_is_parameter_set_and_not_empty\
+			target_device; then
+		if is_target_busy "${target_device}"; then
+			echo_with_color yellow "Target device is busy, please make sure you unmount all filesystems on target device before detaching it."
+		else
+			echo_with_color green "You may now safely detach the target device"
+		fi
+	fi
+
+	if [ "${current_state}" = "finished" ]; then
+		echo_with_color green "Done :)"
+		echo_with_color green "The target device should be bootable now"
+	fi
+
+	return 0
+}; declare -fr trap_exit
+
+trap_interrupt(){
+	printf "\n" # Separate message with previous output
+	echo_with_color yellow "Recieved SIGINT, program is interrupted." 1>&2
+	return 1
+}; declare -fr trap_interrupt
+
+trap_return(){
+	util_check_function_parameters_quantity 1 "${#}"
+	local returning_function="${1}"
+
+	for ignored_function in\
+		util_check_function_parameters_quantity\
+		util_is_parameter_set_and_not_empty\
+		switch_terminal_text_color\
+		echo_with_color; do
+		if [ "${returning_function}" == "${ignored_function}" ]; then
+			return 0
+		fi
+	done
+
+	echo_with_color green "${FUNCNAME[0]}: INFO: returning from ${returning_function}" 1>&2
+}; declare -fr trap_return
+
+## FIXME: Debug trap never work as expected, it always
+## prints two identical lines somehow.
+trap_debug(){
+	util_check_function_parameters_quantity 1 $#
+	local -r command_to_be_executed="${1}"
+
+	local -r command_base="${command_to_be_executed%% *}"
+
+	for ignored_command in util_check_function_parameters_quantity util_is_parameter_set_and_not_empty echo_with_color switch_terminal_text_color tput; do
+		if [ "${command_base}" = "${ignored_command}" ]; then
+			return 0
+		fi
+	done
+
+	case "$(type -t "${command_base}")" in
+		"file")
+			echo_with_color green "${FUNCNAME[0]}: INFO: Executing ${command_to_be_executed}"
+			;;
+		"function")
+			echo_with_color green "${FUNCNAME[0]}: INFO: Calling ${command_base}"
+			;;
+		*)
+			:
+			;;
+	esac
+
+	return 0
+}; declare -fr trap_debug
+
+## An utility function for inhibiting command call output and
+## only show them to user when error occurred
+util_call_external_command(){
+	local -ar command=("${@}")
+
+	local command_output
+	local -i command_exit_status
+	if command_output="$( "${command[@]}" 2>&1 )"; then
+		command_exit_status="0"
+	else
+		command_exit_status="$?"
+	fi
+
+	if [ "${command_exit_status}" -ne 0 ]; then
+		echo_with_color red "Error occurred while running command \"${command[*]}\" (exit status: ${command_exit_status})!" >&2
+
+		local -r read_prompt="Read command output (Y/n)?"
+		printf "%s" "${read_prompt}"
+
+		local answer='y'
+
+		while true; do
+			read -r answer
+
+			if [ "${answer}" == "y" ] || [ "${answer}" == "Y" ]; then
+				echo "${command_output}"
+				break
+			elif [ "${answer}" == "n" ] || [ "${answer}" == "N" ]; then
+				break
+			else
+				printf "%s" "${read_prompt}"
+			fi
+		done
+
+		echo_with_color red "Press ENTER to continue" >&2
+		read -r # catch enter key
+	fi
+
+	return "${command_exit_status}"
+}; declare -fr util_call_external_command
+
+## Configure the terminal to print future messages with certain color
+## $1:
+##     <color>: color of the next message
+##     none: reset color to default
+util_switch_terminal_text_color(){
+	util_check_function_parameters_quantity 1 $#
+	case "$1" in
+		none)
+			tput sgr0
+			;;
+		black)
+			echo -en "\033[0;30m"
+			;;
+		red)
+			echo -en "\033[0;31m"
+			;;
+		green)
+			echo -en "\033[0;32m"
+			;;
+		yellow)
+			echo -en "\033[0;33m"
+			;;
+		blue)
+			echo -en "\033[0;34m"
+			;;
+		white)
+			echo -en "\033[0;37m"
+			;;
+	esac
+}; declare -fr util_switch_terminal_text_color
+
+## Print message with color
+util_echo_with_color(){
+	util_check_function_parameters_quantity 2 "${#}"
+	local -r message_color="${1}"; shift
+	local -r message_body="${1}"
+
+	if [ "${no_color}" -eq 1 ]; then
+		echo -e "${message_body}"
+	else
+		switch_terminal_text_color "${message_color}"
+		echo -e "${message_body}"
+		switch_terminal_text_color none
+	fi
+}; declare -fr util_echo_with_color
+
+util_shift_array(){
+	util_check_function_parameters_quantity 1 "${#}"
+
+	local -n array_ref="${1}"
+
+	if [ "${#array_ref[@]}" -eq 0 ]; then
+		printf "%s: FATAL: array is empty!\n" "${FUNCNAME[0]}" 1>&2
+		exit 1
+	fi
+
+	# Unset the 1st element
+	unset "array_ref[0]"
+
+	# Repack array if element still available in array
+	if [ "${#array_ref[@]}" -ne 0 ]; then
+		array_ref=("${array_ref[@]}")
+	fi
+
+	return 0
+}; declare -fr util_shift_array
+
+util_is_parameter_set_and_not_empty(){
+	util_check_function_parameters_quantity 1 $#
+
+	local parameter_name="${1}"
+
+	if [ ! -v "${parameter_name}" ]; then
+		return 1
+	else
+		declare -n parameter_ref
+		parameter_ref="${parameter_name}"
+
+		if [ -z "${parameter_ref}" ]; then
+			return 1
+		else
+			return 0
+		fi
+	fi
+}; declare -fr util_is_parameter_set_and_not_empty
+
+## Utility function to check if function parameters quantity is legal
+## NOTE: non-static function parameter quantity(e.g. either 2 or 3) is not supported
+util_check_function_parameters_quantity(){
+	if [ "${#}" -ne 2 ]; then
+		printf --\
+			"%s: FATAL: Function requires %u parameters, but %u is given\n"\
+			"${FUNCNAME[0]}"\
+			2\
+			"${#}"
+		exit 1
+	fi
+
+	# The expected given quantity
+	local -i expected_parameter_quantity="${1}"; shift
+	# The actual given parameter quantity, simply pass "${#}" will do
+	local -i given_parameter_quantity="${1}"
+
+	if [ "${given_parameter_quantity}" -ne "${expected_parameter_quantity}" ]; then
+		switch_terminal_text_color red
+		printf --\
+			"%s: FATAL: Function requires %u parameters, but %u is given\n"\
+			"${FUNCNAME[1]}"\
+			"${expected_parameter_quantity}"\
+			"${given_parameter_quantity}"\
+			1>&2
+		switch_terminal_text_color none
+		exit 1
+	fi
+	return 0
+}; declare -fr util_check_function_parameters_quantity
+
+trap trap_exit EXIT
+trap trap_errexit ERR
+trap trap_interrupt INT
+
+init "${@}"

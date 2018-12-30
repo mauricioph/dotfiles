@@ -1,0 +1,14 @@
+#!/bin/bash
+zenity --info --text "Select the folder where the songs are"
+folder=$(zenity --text "Select The folder where the files are" --file-selection --directory)
+convert=$(which oggenc)
+bitrate=$(expr 192)
+zenity --info --text "Select the mount point of the player"
+dest=$(zenity --file-selection --directory)
+
+cd "${folder}"
+
+for i in *.flac;
+do hashmd5=$(/usr/bin/md5sum "${i}" | awk '{print $1}')
+${convert} "${i}" -o "${dest}/${hashmd5}.ogg"
+done
