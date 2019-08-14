@@ -1,0 +1,50 @@
+conky.config = {
+background = true,
+update_interval = 1,
+cpu_avg_samples = 2,
+net_avg_samples = 2,
+out_to_console = false,
+override_utf8_locale = true,
+double_buffer = true,
+no_buffers = true,
+text_buffer_size = 32768,
+imlib_cache_size = 0,
+own_window = true,
+own_window_class = 'Conky',
+own_window_type = 'override',
+own_window_argb_visual = true,
+own_window_argb_value = 200,
+own_window_hints = 'undecorated,below,sticky,skip_taskbar,skip_pager',
+border_inner_margin = 10,
+border_outer_margin = 0,
+xinerama_head = 2,
+alignment = 'top_left',
+gap_x = 0,
+gap_y = 6,
+draw_shades = false,
+draw_outline = false,
+draw_borders = false,
+draw_graph_borders = false,
+use_xft = true,
+font = 'arial Mono:size=10',
+xftalpha = 0.8,
+uppercase = false,
+default_color = '#FFF1F1',
+own_window_colour = '#111619',
+minimum_width = 350, 
+minimum_height = 0,
+color0 = '#467f77',
+};
+conky.text = [[
+${image ~/.config/conky/button-d.png -p 120,2 -s 102x47 -f 86400}
+
+
+${voffset 12}${goto 40}${color0}Root:${color grey60}${goto 120}${fs_free /}${goto 195}free of ${goto 270}${fs_size /}
+${goto 40}${color0}${fs_bar 3,310 /}
+${goto 40}${color0}Boot:${color grey60}${goto 120}${fs_free /boot}${goto 195}free of ${goto 270}${fs_size /boot}
+${goto 40}${color0}${fs_bar 3,310 /boot}
+${goto 40}${color0}Home:${color grey60}${goto 120}${fs_free /home}${goto 195}free of ${goto 270}${fs_size /home}
+${goto 40}${color0}${fs_bar 3,310 /home}
+${goto 40}${color0}Recover:${color grey60}${goto 120}${fs_free /recover}${goto 195}free of ${goto 270}${fs_size /recover}
+${goto 40}${color0}${fs_bar 3,310 /recover}
+]];

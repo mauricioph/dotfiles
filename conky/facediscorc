@@ -1,0 +1,58 @@
+conky.config = {
+alignment = 'top_left',
+background = true,
+border_inner_margin = 10,
+border_outer_margin = 0,
+cpu_avg_samples = 2,
+color0 = '#467f77',
+default_color = '#FFF1F1',
+double_buffer = true,
+draw_shades = false,
+draw_outline = false,
+draw_borders = false,
+draw_graph_borders = false,
+font = 'arial Mono:size=10',
+gap_x = 0,
+gap_y = 405,
+imlib_cache_size = 0,
+minimum_width = 350, 
+net_avg_samples = 2,
+no_buffers = true,
+out_to_console = false,
+override_utf8_locale = true,
+own_window = true,
+own_window_class = 'Conky',
+own_window_type = 'override',
+own_window_argb_visual = true,
+own_window_argb_value = 200,
+own_window_hints = 'undecorated,below,sticky,skip_taskbar,skip_pager',
+own_window_colour = '#111619',
+template1 = '/home/mauricio/.config/conky/disco/temp.gif.',
+template2 = '-p 1,2 -s 355x270',
+text_buffer_size = 32768,
+use_xft = true,
+update_interval = 1,
+uppercase = false,
+xinerama_head = 2,
+xftalpha = 0.8,
+};
+conky.text = [[
+${goto 30}FAN ${color}${hwmon 2 fan 1} RPM     ${color #FFFF00}ACPI ${color}${acpitemp}°C ${color #FFFF00}Battery:${color} ${execi 5 sensors | awk '/^temp1/ {print $2}' | cut -d "+" -f 2}
+${if_updatenr 01}${image ${template1}001 ${template2}}${endif}${if_updatenr 02}${image ${template1}002 ${template2}}${endif}${if_updatenr 03}${image ${template1}003 ${template2}}${endif}${if_updatenr 04}${image ${template1}004 ${template2}}${endif}${if_updatenr 05}${image ${template1}005 ${template2}}${endif}
+${if_updatenr 06}${image ${template1}006 ${template2}}${endif}${if_updatenr 07}${image ${template1}007 ${template2}}${endif}${if_updatenr 08}${image ${template1}008 ${template2}}${endif}${if_updatenr 09}${image ${template1}009 ${template2}}${endif}${if_updatenr 10}${image ${template1}010 ${template2}}${endif}${if_updatenr 11}${image ${template1}011 ${template2}}${endif}
+${if_updatenr 12}${image ${template1}012 ${template2}}${endif}${if_updatenr 13}${image ${template1}013 ${template2}}${endif}${if_updatenr 14}${image ${template1}014 ${template2}}${endif}${if_updatenr 15}${image ${template1}015 ${template2}}${endif}${if_updatenr 16}${image ${template1}016 ${template2}}${endif}${if_updatenr 17}${image ${template1}017 ${template2}}${endif}
+${if_updatenr 18}${image ${template1}018 ${template2}}${endif}${if_updatenr 19}${image ${template1}019 ${template2}}${endif}${if_updatenr 20}${image ${template1}020 ${template2}}${endif}${if_updatenr 21}${image ${template1}021 ${template2}}${endif}${if_updatenr 22}${image ${template1}022 ${template2}}${endif}${if_updatenr 23}${image ${template1}023 ${template2}}${endif}
+${if_updatenr 24}${image ${template1}024 ${template2}}${endif}${if_updatenr 25}${image ${template1}025 ${template2}}${endif}${if_updatenr 26}${image ${template1}026 ${template2}}${endif}${if_updatenr 27}${image ${template1}027 ${template2}}${endif}${if_updatenr 28}${image ${template1}028 ${template2}}${endif}${if_updatenr 29}${image ${template1}029 ${template2}}${endif}${if_updatenr 30}${image ${template1}030 ${template2}}${endif}${if_updatenr 31}${image ${template1}031 ${template2}}${endif}
+${if_updatenr 32}${image ${template1}032 ${template2}}${endif}${if_updatenr 33}${image ${template1}033 ${template2}}${endif}${if_updatenr 34}${image ${template1}034 ${template2}}${endif}${if_updatenr 35}${image ${template1}035 ${template2}}${endif}${if_updatenr 36}${image ${template1}036 ${template2}}${endif}${if_updatenr 37}${image ${template1}037 ${template2}}${endif}
+${if_updatenr 38}${image ${template1}038 ${template2}}${endif}${if_updatenr 39}${image ${template1}039 ${template2}}${endif}${if_updatenr 40}${image ${template1}040 ${template2}}${endif}${if_updatenr 41}${image ${template1}041 ${template2}}${endif}
+${if_updatenr 42}${image ${template1}042 ${template2}}${endif}
+${if_updatenr 43}${image ${template1}043 ${template2}}${endif}
+${if_updatenr 44}${image ${template1}044 ${template2}}${endif}
+${if_updatenr 45}${image ${template1}045 ${template2}}${endif}
+${if_updatenr 46}${image ${template1}046 ${template2}}${endif}
+${if_updatenr 47}${image ${template1}047 ${template2}}${endif}
+${if_updatenr 48}${image ${template1}048 ${template2}}${endif}
+${if_updatenr 49}${image ${template1}049 ${template2}}${endif}
+${if_updatenr 50}${image ${template1}050 ${template2}}${endif}
+${color}${execi 60 ${HOME}/.config/conky/readlines.sh}
+]]

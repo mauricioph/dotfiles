@@ -1,0 +1,46 @@
+conky.config = {
+alignment = 'top_left',
+background = true,
+border_inner_margin = 10,
+border_outer_margin = 0,
+color0 = '#467f77',
+cpu_avg_samples = 2,
+default_color = '#FFF1F1',
+double_buffer = true,
+draw_shades = false,
+draw_outline = false,
+draw_borders = false,
+draw_graph_borders = false,
+font = 'arial Mono:size=10',
+gap_x = 0,
+gap_y = 205,
+imlib_cache_size = 0,
+minimum_width = 350, 
+minimum_height = 0,
+net_avg_samples = 2,
+no_buffers = true,
+out_to_console = false,
+override_utf8_locale = true,
+own_window = true,
+own_window_class = 'Conky',
+own_window_type = 'override',
+own_window_argb_visual = true,
+own_window_argb_value = 200,
+own_window_hints = 'undecorated,below,sticky,skip_taskbar,skip_pager',
+own_window_colour = '#111619',
+text_buffer_size = 32768,
+update_interval = 1,
+uppercase = false,
+use_xft = true,
+xinerama_head = 2,
+xftalpha = 0.8,
+};
+conky.text = [[
+${color0}${goto 40}${voffset 6}${font Font Awesome 5 Free:size=48:style=bold}${time %I}:${time %M}:${time %S}${font}
+${color0}${goto 109}Kernel: ${color grey60}$kernel
+${color0}${goto 108}Date: ${color grey60}${time %A  %d %b. %Y}
+${color0}${goto 105}Uptime: ${color grey60}$uptime
+${color0}${goto 98}Hostname: ${color grey60}$nodename
+${color0}${goto 90}Distro: ${color grey60}${exec lsb_release -d -s}
+${color0}${goto 64}Load: ${color grey60}$loadavg
+]]
