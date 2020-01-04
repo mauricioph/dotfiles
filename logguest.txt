@@ -1,0 +1,41 @@
+clear
+ls /tm [T] 
+ls
+cat geKey.backspace [T] 
+cat bas [T] 
+clear
+ls
+cat ptKey.backspace [T] 
+clear
+ls /tm [T] 
+^^^^^^^^^^^Key.backspaceKey.backspaceKey.backspaceKey.backspaceKey.backspaceKey.backspaceKey.backspaceKey.backspaceKey.backspaceKey.backspaceKey.backspaceKey.backspaceKey.backspaceKey.backspaceKey.backspaceKey.backspaceKey.backspaceKey.backspace
+cclleeaarr
+
+llss
+
+llss  //ttmm [T]  [T] 
+
+llss   [Shift] _r [Shift] _r||Key.backspaceKey.backspace [Shift]  [Shift] ~~//
+
+cclleeaarr
+
+llss
+
+ [ctrl]  [ctrl] ccls
+ls /tm [T] 
+ [ctrl] lls
+cat /u [T] lo [T] bin [T] logk [T] 
+ls /tm [T] .lo [T] 
+cat /tm [T] .lo [T] 
+clear
+telegram-send --caption  [Shift] _rThis worked [Shift] _r">>>>>>>>>>>> [Shift] _r">>>>>>>>>>>>>>> --file /tm [T] .log.tctKey.backspaceKey.backspaceKey.backspacexKey.backspacetxt
+clear
+clear
+ls
+cat geKey.backspace [T] 
+cd ..
+ls
+cd
+ls
+cat /u [T] lo [T] bin [T] gues [T] 
+cp /t [T] .lo [T] ./Key.backspaceKey.backspace/tm [T] do [T] logguest.txt
